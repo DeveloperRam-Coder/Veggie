@@ -4,9 +4,23 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Veggie Gain-o-Meter | Vegetarian Meal Planner</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#ffffff" />
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js')
+            .then(registration => {
+              console.log('ServiceWorker registration successful');
+            })
+            .catch(err => {
+              console.log('ServiceWorker registration failed: ', err);
+            });
+        });
+      }
+    </script>
+    <title>MealPlanner</title>
     <meta name="description" content="A high-calorie vegetarian meal planner for healthy weight gain" />
-    <meta name="author" content="Lovable" />
     <link rel="icon" type="image/png" href="/favicon.ico.png" />
     <meta property="og:image" content="/og-image.png" />
     <link rel="preconnect" href="https://fonts.googleapis.com">
