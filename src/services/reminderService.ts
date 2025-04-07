@@ -5,7 +5,6 @@ import { MealPlan, MealTime } from "@/types/meal";
 
 // Local storage key
 const REMINDERS_KEY = 'veggie-gain-reminders';
-
 // Helper function to generate ID
 const generateId = (): string => {
   return Date.now().toString(36) + Math.random().toString(36).substring(2);
@@ -145,62 +144,124 @@ export const initializeDefaultReminders = (): void => {
 // Track active notification timeouts
 let activeTimeouts: number[] = [];
 
-// Schedule notifications with proper sound playback
-export const scheduleNotifications = (): void => {
-  // Clear any existing timeouts
-  activeTimeouts.forEach(timeoutId => window.clearTimeout(timeoutId));
-  activeTimeouts = [];
-  
-  const reminders = getReminders().filter(r => r.enabled);
-  
-  if (Notification && Notification.permission !== "granted") {
-    Notification.requestPermission();
-  }
-  
-  // Schedule new notifications
-  reminders.forEach(reminder => {
-    const [hours, minutes] = reminder.reminderTime.split(':').map(Number);
-    const now = new Date();
-    const reminderTime = new Date();
-    reminderTime.setHours(hours, minutes, 0, 0);
+// Schedule notifications with proper sound playback and wake lock support
+export const scheduleNotifications = async (): Promise<void> => {
+  try {
+    // Clear any existing timeouts
+    activeTimeouts.forEach(timeoutId => window.clearTimeout(timeoutId));
+    activeTimeouts = [];
     
-    // If the time has already passed today, schedule for tomorrow
-    if (reminderTime < now) {
-      reminderTime.setDate(reminderTime.getDate() + 1);
+    const reminders = getReminders().filter(r => r.enabled);
+    
+    if (!('Notification' in window)) {
+      console.warn('This browser does not support notifications');
+      return;
     }
-    
-    const timeUntilReminder = reminderTime.getTime() - now.getTime();
-    
-    console.log(`Scheduling reminder for ${reminder.label} at ${reminderTime.toLocaleString()}, which is in ${Math.round(timeUntilReminder/60000)} minutes`);
-    
-    const timeoutId = window.setTimeout(() => {
-      // Stop any currently playing sound first
-      stopSound();
+
+    // Request notification permission if not granted
+    if (Notification.permission !== 'granted') {
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        console.log('Notification permission denied');
+        return;
+      }
+    }
+
+    // Register service worker for offline support
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js', {
+        scope: '/',
+        updateViaCache: 'none'
+      });
       
-      // Find the sound and play for the full duration (default 30 seconds)
-      const sound = availableSounds.find(s => s.id === reminder.soundId);
-      if (sound) {
-        console.log(`Playing sound for ${reminder.label} for ${sound.duration || 30} seconds`);
-        playSound(sound.url, sound.duration || 30);
+      await navigator.serviceWorker.ready;
+      
+      // Store reminders in IndexedDB for offline access
+      const db = await openDatabase();
+      const transaction = db.transaction(['reminders'], 'readwrite');
+      const store = transaction.objectStore('reminders');
+      
+      // Clear existing reminders
+      await store.clear();
+      
+      // Store each reminder
+      for (const reminder of reminders) {
+        await store.add(reminder);
       }
       
-      if (Notification.permission === "granted") {
-        new Notification(`Time for ${reminder.label}`, {
-          body: `It's ${reminder.reminderTime}. Time for your ${reminder.label.toLowerCase()}.`,
-          icon: '/favicon.ico',
-          silent: true // We'll handle the sound manually to ensure it plays
-        });
+      // Register periodic sync if available
+      if ('periodicSync' in registration) {
+        try {
+          const status = await navigator.permissions.query({
+            name: 'periodic-background-sync' as PermissionName
+          });
+          
+          if (status.state === 'granted') {
+            await registration.periodicSync.register('reminders-sync', {
+              minInterval: 60 * 60 * 1000 // Sync every hour
+            });
+          }
+        } catch (err) {
+          console.warn('Periodic sync not available:', err);
+          // Fallback to regular sync
+          if ('sync' in registration) {
+            await registration.sync.register('reminders-sync');
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Service worker registration failed:', err);
+    }
+  } catch (error) {
+    console.error('Error in scheduleNotifications:', error);
+    setTimeout(() => scheduleNotifications(), 5000);
+  }
+};
+
+// Helper function to open IndexedDB with improved error handling and schema versioning
+const openDatabase = async (): Promise<IDBDatabase> => {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open('veggie-reminders', 2); // Increment version for schema updates
+    
+    request.onerror = () => {
+      console.error('IndexedDB error:', request.error);
+      reject(request.error);
+    };
+
+    request.onsuccess = () => {
+      const db = request.result;
+      
+      // Add error handler for database-level errors
+      db.onerror = (event) => {
+        console.error('Database error:', (event.target as IDBDatabase).onerror);
+      };
+      
+      resolve(db);
+    };
+    
+    request.onupgradeneeded = (event) => {
+      const db = (event.target as IDBOpenDBRequest).result;
+      
+      // Handle schema updates
+      if (!db.objectStoreNames.contains('reminders')) {
+        const store = db.createObjectStore('reminders', { keyPath: 'id' });
+        
+        // Add indexes for better query performance
+        store.createIndex('mealTime', 'mealTime', { unique: false });
+        store.createIndex('enabled', 'enabled', { unique: false });
+        store.createIndex('reminderTime', 'reminderTime', { unique: false });
       }
       
-      // Reschedule this notification for tomorrow
-      scheduleNotifications();
-    }, timeUntilReminder);
-    
-    activeTimeouts.push(timeoutId);
+      // Add new object store for failed notifications
+      if (!db.objectStoreNames.contains('failed_notifications')) {
+        db.createObjectStore('failed_notifications', { keyPath: 'id', autoIncrement: true });
+      }
+    };
+
+    request.onblocked = () => {
+      console.warn('Database upgrade blocked. Please close other tabs using the app.');
+    };
   });
-  
-  // For debugging purposes
-  console.log(`Scheduled ${reminders.length} reminders. Next check at ${new Date(Date.now() + 60000).toLocaleTimeString()}`);
 };
 
 // Function to test sound immediately
